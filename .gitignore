@@ -1,0 +1,13 @@
+# Environment variables
+.env.local
+.env*.local
+
+# Dependencies
+node_modules/
+
+# Next.js build output
+.next/
+
+# Data files — keep directory tracked via .gitkeep, not JSON data
+data/*.json
+!data/.gitkeep
