@@ -6,7 +6,7 @@ import Sidebar from '@/components/Sidebar';
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'Mohit AXIS — Data Cleaning Project',
+  title: 'Mohit Data Enrichment Project',
   description: 'Enrich contact records with current employment information using AI',
 };
 

@@ -48,10 +48,10 @@ export default function Sidebar() {
           </div>
           <div className="leading-tight">
             <span className="text-white font-bold text-sm tracking-wide">Mohit</span>
-            <span className="text-blue-400 font-black text-sm tracking-widest ml-1">AXIS</span>
+            <span className="text-blue-400 font-black text-sm tracking-widest ml-1">Data Enrichment</span>
           </div>
         </div>
-        <p className="text-slate-400 text-xs leading-tight pl-0.5">Data Cleaning Project</p>
+        <p className="text-slate-400 text-xs leading-tight pl-0.5">Data Enrichment Project</p>
       </div>
 
       {/* Navigation */}
