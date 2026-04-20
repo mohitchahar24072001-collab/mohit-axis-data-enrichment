@@ -13,6 +13,7 @@ interface Contact {
   original_title: string | null;
   current_company: string | null;
   current_title: string | null;
+  linkedin_url: string | null;
   confidence_score: number | null;
   status: 'pending' | 'enriching' | 'enriched' | 'failed';
   updated_at: string;
