@@ -1,17 +1,8 @@
-import { createClient } from '@supabase/supabase-js';
+import { neon } from '@neondatabase/serverless';
 
-// ── Supabase client ────────────────────────────────────────────────────────
-// Uses SERVICE key (server-side only — never expose to browser)
-const supabaseUrl = process.env.SUPABASE_URL!;
-const supabaseKey = process.env.SUPABASE_SERVICE_KEY!;
-
-let _supabase: ReturnType<typeof createClient> | null = null;
-
-function getClient() {
-  if (!_supabase) {
-    _supabase = createClient(supabaseUrl, supabaseKey);
-  }
-  return _supabase;
+// ── Neon Postgres client ───────────────────────────────────────────────────
+function getSQL() {
+  return neon(process.env.DATABASE_URL!);
 }
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -72,165 +63,158 @@ export interface Stats {
 export async function insertContact(
   contact: Omit<Contact, 'id' | 'created_at' | 'updated_at'>
 ): Promise<number> {
-  const supabase = getClient();
-  const { data, error } = await supabase
-    .from('contacts')
-    .insert(contact)
-    .select('id')
-    .single();
-  if (error) throw new Error(error.message);
-  return data.id;
+  const sql = getSQL();
+  const rows = await sql`
+    INSERT INTO contacts (first_name, last_name, email, original_company, original_title,
+      city, country, current_company, current_title, linkedin_url, sources,
+      confidence_score, status, error_message)
+    VALUES (${contact.first_name}, ${contact.last_name}, ${contact.email},
+      ${contact.original_company}, ${contact.original_title}, ${contact.city},
+      ${contact.country}, ${contact.current_company}, ${contact.current_title},
+      ${contact.linkedin_url}, ${contact.sources}, ${contact.confidence_score},
+      ${contact.status}, ${contact.error_message})
+    RETURNING id
+  `;
+  return rows[0].id;
 }
 
-export async function insertManyContacts(
-  items: Pick<
-    Contact,
-    | 'first_name'
-    | 'last_name'
-    | 'email'
-    | 'original_company'
-    | 'original_title'
-    | 'city'
-    | 'country'
-    | 'current_company'
-    | 'current_title'
-    | 'linkedin_url'
-    | 'sources'
-    | 'confidence_score'
-    | 'status'
-    | 'error_message'
-  >[]
-): Promise<number> {
-  const supabase = getClient();
-  const { error } = await supabase.from('contacts').insert(items);
-  if (error) throw new Error(error.message);
+export async function insertManyContacts(items: Omit<Contact, 'id' | 'created_at' | 'updated_at'>[]): Promise<number> {
+  if (items.length === 0) return 0;
+  const sql = getSQL();
+  for (const item of items) {
+    await sql`
+      INSERT INTO contacts (first_name, last_name, email, original_company, original_title,
+        city, country, current_company, current_title, linkedin_url, sources,
+        confidence_score, status, error_message)
+      VALUES (${item.first_name}, ${item.last_name}, ${item.email},
+        ${item.original_company}, ${item.original_title}, ${item.city}, ${item.country},
+        ${item.current_company ?? null}, ${item.current_title ?? null},
+        ${item.linkedin_url ?? null}, ${item.sources ?? null},
+        ${item.confidence_score ?? null}, ${item.status ?? 'pending'}, ${item.error_message ?? null})
+    `;
+  }
   return items.length;
 }
 
 export async function getContact(id: number): Promise<Contact | null> {
-  const supabase = getClient();
-  const { data, error } = await supabase
-    .from('contacts')
-    .select('*')
-    .eq('id', id)
-    .single();
-  if (error) return null;
-  return data as Contact;
+  const sql = getSQL();
+  const rows = await sql`SELECT * FROM contacts WHERE id = ${id} LIMIT 1`;
+  return (rows[0] as Contact) ?? null;
 }
 
 export async function getContacts(query: ContactsQuery = {}): Promise<PaginatedContacts> {
-  const supabase = getClient();
+  const sql = getSQL();
   const { page = 1, limit = 50, status, search } = query;
   const offset = (page - 1) * limit;
 
-  let q = supabase.from('contacts').select('*', { count: 'exact' });
+  let contacts: Contact[];
+  let countRows: { count: string }[];
 
-  if (status && status !== 'all') {
-    q = q.eq('status', status);
-  }
-
-  if (search) {
+  if (status && status !== 'all' && search) {
     const s = `%${search}%`;
-    q = q.or(
-      `first_name.ilike.${s},last_name.ilike.${s},email.ilike.${s},original_company.ilike.${s}`
-    );
+    contacts = await sql`
+      SELECT * FROM contacts
+      WHERE status = ${status}
+        AND (first_name ILIKE ${s} OR last_name ILIKE ${s} OR email ILIKE ${s} OR original_company ILIKE ${s})
+      ORDER BY updated_at DESC LIMIT ${limit} OFFSET ${offset}
+    ` as Contact[];
+    countRows = await sql`
+      SELECT COUNT(*)::text as count FROM contacts
+      WHERE status = ${status}
+        AND (first_name ILIKE ${s} OR last_name ILIKE ${s} OR email ILIKE ${s} OR original_company ILIKE ${s})
+    ` as { count: string }[];
+  } else if (status && status !== 'all') {
+    contacts = await sql`
+      SELECT * FROM contacts WHERE status = ${status}
+      ORDER BY updated_at DESC LIMIT ${limit} OFFSET ${offset}
+    ` as Contact[];
+    countRows = await sql`SELECT COUNT(*)::text as count FROM contacts WHERE status = ${status}` as { count: string }[];
+  } else if (search) {
+    const s = `%${search}%`;
+    contacts = await sql`
+      SELECT * FROM contacts
+      WHERE first_name ILIKE ${s} OR last_name ILIKE ${s} OR email ILIKE ${s} OR original_company ILIKE ${s}
+      ORDER BY updated_at DESC LIMIT ${limit} OFFSET ${offset}
+    ` as Contact[];
+    countRows = await sql`
+      SELECT COUNT(*)::text as count FROM contacts
+      WHERE first_name ILIKE ${s} OR last_name ILIKE ${s} OR email ILIKE ${s} OR original_company ILIKE ${s}
+    ` as { count: string }[];
+  } else {
+    contacts = await sql`
+      SELECT * FROM contacts ORDER BY updated_at DESC LIMIT ${limit} OFFSET ${offset}
+    ` as Contact[];
+    countRows = await sql`SELECT COUNT(*)::text as count FROM contacts` as { count: string }[];
   }
 
-  q = q.order('updated_at', { ascending: false }).range(offset, offset + limit - 1);
-
-  const { data, error, count } = await q;
-  if (error) throw new Error(error.message);
-
-  const total = count ?? 0;
-  return {
-    contacts: (data as Contact[]) ?? [],
-    total,
-    page,
-    limit,
-    totalPages: Math.ceil(total / limit),
-  };
+  const total = parseInt(countRows[0]?.count ?? '0');
+  return { contacts, total, page, limit, totalPages: Math.ceil(total / limit) };
 }
 
 export async function updateContact(id: number, data: Partial<Contact>): Promise<void> {
-  const supabase = getClient();
-  // Remove id/created_at from update payload
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { id: _id, created_at: _ca, ...rest } = data as Record<string, unknown>;
-  const { error } = await supabase
-    .from('contacts')
-    .update({ ...rest, updated_at: new Date().toISOString() })
-    .eq('id', id);
-  if (error) throw new Error(error.message);
+  const sql = getSQL();
+  const d = data as Record<string, unknown>;
+  await sql`
+    UPDATE contacts SET
+      first_name = CASE WHEN ${d.first_name !== undefined} THEN ${d.first_name as string ?? null} ELSE first_name END,
+      last_name = CASE WHEN ${d.last_name !== undefined} THEN ${d.last_name as string ?? null} ELSE last_name END,
+      email = CASE WHEN ${d.email !== undefined} THEN ${d.email as string ?? null} ELSE email END,
+      current_company = CASE WHEN ${d.current_company !== undefined} THEN ${d.current_company as string ?? null} ELSE current_company END,
+      current_title = CASE WHEN ${d.current_title !== undefined} THEN ${d.current_title as string ?? null} ELSE current_title END,
+      linkedin_url = CASE WHEN ${d.linkedin_url !== undefined} THEN ${d.linkedin_url as string ?? null} ELSE linkedin_url END,
+      sources = CASE WHEN ${d.sources !== undefined} THEN ${d.sources as string ?? null} ELSE sources END,
+      confidence_score = CASE WHEN ${d.confidence_score !== undefined} THEN ${d.confidence_score as number ?? null} ELSE confidence_score END,
+      status = CASE WHEN ${d.status !== undefined} THEN ${d.status as string ?? null} ELSE status END,
+      error_message = CASE WHEN ${d.error_message !== undefined} THEN ${d.error_message as string ?? null} ELSE error_message END,
+      updated_at = NOW()
+    WHERE id = ${id}
+  `;
 }
 
 export async function getPendingContacts(limit = 100): Promise<Contact[]> {
-  const supabase = getClient();
-  const { data, error } = await supabase
-    .from('contacts')
-    .select('*')
-    .eq('status', 'pending')
-    .order('created_at', { ascending: true })
-    .limit(limit);
-  if (error) throw new Error(error.message);
-  return (data as Contact[]) ?? [];
+  const sql = getSQL();
+  return await sql`
+    SELECT * FROM contacts WHERE status = 'pending'
+    ORDER BY created_at ASC LIMIT ${limit}
+  ` as Contact[];
 }
 
 export async function getContactsByIds(ids: number[]): Promise<Contact[]> {
   if (ids.length === 0) return [];
-  const supabase = getClient();
-  const { data, error } = await supabase.from('contacts').select('*').in('id', ids);
-  if (error) throw new Error(error.message);
-  return (data as Contact[]) ?? [];
+  const sql = getSQL();
+  return await sql`SELECT * FROM contacts WHERE id = ANY(${ids})` as Contact[];
 }
 
 export async function getAllContacts(): Promise<Contact[]> {
-  const supabase = getClient();
-  const { data, error } = await supabase
-    .from('contacts')
-    .select('*')
-    .order('id', { ascending: true });
-  if (error) throw new Error(error.message);
-  return (data as Contact[]) ?? [];
+  const sql = getSQL();
+  return await sql`SELECT * FROM contacts ORDER BY id ASC` as Contact[];
 }
 
 export async function getStats(): Promise<Stats> {
-  const supabase = getClient();
-  const { data, error } = await supabase.rpc('get_contact_stats');
-  if (error) {
-    // Fallback: manual counts if RPC not available
-    const { data: contacts, error: err2 } = await supabase
-      .from('contacts')
-      .select('status');
-    if (err2) throw new Error(err2.message);
-    const all = contacts ?? [];
-    return {
-      total: all.length,
-      enriched: all.filter((c: { status: string }) => c.status === 'enriched').length,
-      pending: all.filter((c: { status: string }) => c.status === 'pending').length,
-      failed: all.filter((c: { status: string }) => c.status === 'failed').length,
-      enriching: all.filter((c: { status: string }) => c.status === 'enriching').length,
-    };
-  }
-  return data as Stats;
+  const sql = getSQL();
+  const rows = await sql`
+    SELECT
+      COUNT(*)::int as total,
+      COUNT(*) FILTER (WHERE status = 'enriched')::int as enriched,
+      COUNT(*) FILTER (WHERE status = 'pending')::int as pending,
+      COUNT(*) FILTER (WHERE status = 'failed')::int as failed,
+      COUNT(*) FILTER (WHERE status = 'enriching')::int as enriching
+    FROM contacts
+  `;
+  return rows[0] as Stats;
 }
 
 export async function deleteContacts(ids: number[]): Promise<number> {
   if (ids.length === 0) return 0;
-  const supabase = getClient();
-  // activity_log rows cascade-delete automatically (FK ON DELETE CASCADE)
-  const { error, count } = await supabase
-    .from('contacts')
-    .delete({ count: 'exact' })
-    .in('id', ids);
-  if (error) throw new Error(error.message);
-  return count ?? 0;
+  const sql = getSQL();
+  const rows = await sql`DELETE FROM contacts WHERE id = ANY(${ids}) RETURNING id`;
+  return rows.length;
 }
 
 export async function deleteAllContacts(): Promise<void> {
-  const supabase = getClient();
-  // Delete activity first (in case no cascade), then contacts
-  await supabase.from('activity_log').delete().neq('id', 0);
-  await supabase.from('contacts').delete().neq('id', 0);
+  const sql = getSQL();
+  await sql`DELETE FROM activity_log`;
+  await sql`DELETE FROM contacts`;
 }
 
 // ── Activity Log ───────────────────────────────────────────────────────────
@@ -240,34 +224,29 @@ export async function logActivity(
   action: string,
   details?: string
 ): Promise<void> {
-  const supabase = getClient();
-  await supabase.from('activity_log').insert({
-    contact_id: contactId,
-    action,
-    details: details ?? null,
-  });
-  // Trim to last 500 — Supabase handles this via a DB trigger ideally,
-  // but for now we skip trimming (Supabase storage is generous on free tier)
+  const sql = getSQL();
+  await sql`
+    INSERT INTO activity_log (contact_id, action, details)
+    VALUES (${contactId}, ${action}, ${details ?? null})
+  `;
+  await sql`
+    DELETE FROM activity_log WHERE id NOT IN (
+      SELECT id FROM activity_log ORDER BY created_at DESC LIMIT 500
+    )
+  `;
 }
 
 export async function getRecentActivity(
   limit = 20
 ): Promise<(ActivityLog & { contact_name?: string })[]> {
-  const supabase = getClient();
-  const { data, error } = await supabase
-    .from('activity_log')
-    .select('*, contacts(first_name, last_name)')
-    .order('created_at', { ascending: false })
-    .limit(limit);
-  if (error) throw new Error(error.message);
-
-  return (data ?? []).map((row: Record<string, unknown>) => {
-    const contact = row.contacts as { first_name?: string; last_name?: string } | null;
-    const name = contact
-      ? `${contact.first_name ?? ''} ${contact.last_name ?? ''}`.trim()
-      : undefined;
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { contacts: _c, ...rest } = row;
-    return { ...(rest as ActivityLog), contact_name: name || undefined };
-  });
+  const sql = getSQL();
+  const rows = await sql`
+    SELECT a.*,
+      TRIM(CONCAT(COALESCE(c.first_name, ''), ' ', COALESCE(c.last_name, ''))) as contact_name
+    FROM activity_log a
+    LEFT JOIN contacts c ON c.id = a.contact_id
+    ORDER BY a.created_at DESC
+    LIMIT ${limit}
+  `;
+  return rows as (ActivityLog & { contact_name?: string })[];
 }
