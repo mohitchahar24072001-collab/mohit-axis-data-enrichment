@@ -16,9 +16,9 @@ const MIN_CONFIDENCE = 70;
 
 // Models to try in order — if one is overloaded, fall back to the next
 const MODELS = [
-  'gemini-2.5-flash',
-  'gemini-2.0-flash',
-  'gemini-1.5-flash',
+  'gemini-2.5-flash-lite',  // lightest, most available
+  'gemini-2.5-flash',       // fallback
+  'gemini-2.0-flash',       // last resort
 ];
 
 function sleep(ms: number) {
