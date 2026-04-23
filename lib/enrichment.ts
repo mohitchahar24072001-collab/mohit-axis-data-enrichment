@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { Contact, getContact, updateContact, logActivity } from './db';
+import { Contact, getContact, updateContact, logActivity, getPendingContacts } from './db';
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY!);
 
@@ -13,20 +13,19 @@ export interface EnrichmentResult {
 }
 
 const MIN_CONFIDENCE = 70;
-const MAX_RETRIES = 3;
 
-// Parse retry delay from Gemini 429 error messages
-function getRetryDelayMs(error: unknown): number {
-  const msg = error instanceof Error ? error.message : String(error);
-  const match = msg.match(/retryDelay['":\s]+(\d+)s/);
-  if (match) return (parseInt(match[1]) + 2) * 1000;
-  return 15000; // default 15s
-}
+// Models to try in order — if one is overloaded, fall back to the next
+const MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
+];
 
 function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// ── In-memory queue (for local dev) ───────────────────────────────────────
 let isEnriching = false;
 let enrichmentQueue: number[] = [];
 let currentEnrichingId: number | null = null;
@@ -42,7 +41,7 @@ export function startEnrichmentQueue(ids: number[]) {
     enrichmentQueue.push(...ids.filter(id => !enrichmentQueue.includes(id)));
     return;
   }
-  enrichmentQueue = ids;
+  enrichmentQueue = [...ids];
   processedCount = 0;
   failedCount = 0;
   isEnriching = true;
@@ -70,9 +69,30 @@ async function processNextInQueue() {
     failedCount++;
     console.error(`Failed contact ${id}:`, e);
   }
-  setTimeout(() => processNextInQueue(), 3000);
+  setTimeout(() => processNextInQueue(), 2000);
 }
 
+// ── Serverless-safe: process ONE contact and return ────────────────────────
+// Called by the API route on Vercel — processes one pending contact per request.
+export async function processOneContact(contactId?: number): Promise<{ done: boolean; contactId?: number; result?: string }> {
+  let id = contactId;
+
+  if (!id) {
+    // Auto-reset contacts stuck in "enriching" for safety
+    const pending = await getPendingContacts(1);
+    if (pending.length === 0) return { done: true };
+    id = pending[0].id;
+  }
+
+  try {
+    await enrichContact(id);
+    return { done: false, contactId: id, result: 'success' };
+  } catch {
+    return { done: false, contactId: id, result: 'failed' };
+  }
+}
+
+// ── Core enrichment ────────────────────────────────────────────────────────
 export async function enrichContact(contactId: number): Promise<EnrichmentResult> {
   const contact = await getContact(contactId);
   if (!contact) throw new Error(`Contact ${contactId} not found`);
@@ -98,23 +118,21 @@ export async function enrichContact(contactId: number): Promise<EnrichmentResult
           : null,
     });
 
-    await logActivity(
-      contactId,
-      'enrichment_completed',
-      `${result.confidence_score}% — ${result.current_company || '?'} / ${result.current_title || '?'}`
-    );
+    await logActivity(contactId, 'enrichment_completed',
+      `${result.confidence_score}% — ${result.current_company || '?'} / ${result.current_title || '?'}`);
 
     return result;
   } catch (error) {
     const raw = error instanceof Error ? error.message : 'Unknown error';
-    // Show clean message instead of raw API error
     let msg = raw;
     if (raw.includes('429') || raw.includes('quota')) {
-      msg = 'API rate limit reached. The free tier allows 20 searches/day. Try again tomorrow or enable billing at aistudio.google.com.';
+      msg = 'API rate limit reached. Free tier allows ~50 searches/day. Try again tomorrow.';
     } else if (raw.includes('403')) {
-      msg = 'API key not authorised. Check your GOOGLE_API_KEY in .env.local.';
+      msg = 'API key not authorised. Check your GOOGLE_API_KEY.';
     } else if (raw.includes('404')) {
       msg = 'AI model not found. Check your API key has Gemini access.';
+    } else if (raw.includes('503') || raw.includes('overloaded') || raw.includes('high demand')) {
+      msg = 'Gemini AI is temporarily overloaded. Please try again in a few minutes.';
     }
     await updateContact(contactId, { status: 'failed', error_message: msg });
     await logActivity(contactId, 'enrichment_failed', `Failed: ${msg}`);
@@ -133,12 +151,6 @@ async function performEnrichment(contact: Contact): Promise<EnrichmentResult> {
   const location = [contact.city, contact.country].filter(Boolean).join(', ');
   const email = contact.email || '';
   const year = new Date().getFullYear();
-
-  // Gemini 2.5 Flash with Google Search grounding — searches live web automatically
-  const model = genAI.getGenerativeModel({
-    model: 'gemini-2.5-flash',
-    tools: [{ googleSearch: {} } as never],
-  });
 
   const prompt = `You are a professional data enrichment researcher. Search the web to find the CURRENT employment of this specific person in ${year}.
 
@@ -171,41 +183,54 @@ Respond ONLY with this exact JSON (no markdown, no extra text):
   "sources": ["https://...", "https://..."]
 }`;
 
-  // Retry with automatic backoff on rate limit (429) errors
+  // Try each model in order — if one is overloaded/fails, move to the next
   let lastError: unknown;
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const result = await model.generateContent(prompt);
-      const text = result.response.text();
-
-      // Extract grounding sources from metadata
-      const groundingSources: string[] = [];
+  for (const modelName of MODELS) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        const candidates = result.response.candidates || [];
-        for (const candidate of candidates) {
-          const meta = (candidate as { groundingMetadata?: { groundingChunks?: { web?: { uri?: string } }[] } }).groundingMetadata;
-          if (meta?.groundingChunks) {
-            for (const chunk of meta.groundingChunks) {
-              if (chunk.web?.uri) groundingSources.push(chunk.web.uri);
+        const model = genAI.getGenerativeModel({
+          model: modelName,
+          tools: [{ googleSearch: {} } as never],
+        });
+
+        const result = await model.generateContent(prompt);
+        const text = result.response.text();
+
+        // Extract grounding sources
+        const groundingSources: string[] = [];
+        try {
+          const candidates = result.response.candidates || [];
+          for (const candidate of candidates) {
+            const meta = (candidate as { groundingMetadata?: { groundingChunks?: { web?: { uri?: string } }[] } }).groundingMetadata;
+            if (meta?.groundingChunks) {
+              for (const chunk of meta.groundingChunks) {
+                if (chunk.web?.uri) groundingSources.push(chunk.web.uri);
+              }
             }
           }
-        }
-      } catch { /* metadata not available */ }
+        } catch { /* metadata not available */ }
 
-      return parseJsonResult(text, groundingSources);
-    } catch (err) {
-      lastError = err;
-      const msg = err instanceof Error ? err.message : String(err);
-      const isRateLimit = msg.includes('429') || msg.includes('quota');
-      if (isRateLimit && attempt < MAX_RETRIES) {
-        const delay = getRetryDelayMs(err);
-        console.log(`Rate limited. Waiting ${delay / 1000}s then retry ${attempt + 1}/${MAX_RETRIES}...`);
-        await sleep(delay);
-      } else {
-        throw err;
+        return parseJsonResult(text, groundingSources);
+
+      } catch (err) {
+        lastError = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        const isOverloaded = msg.includes('503') || msg.includes('overloaded') || msg.includes('high demand');
+        const isRateLimit = msg.includes('429') || msg.includes('quota');
+
+        if (isOverloaded) {
+          console.log(`Model ${modelName} overloaded, trying next model...`);
+          break; // Move to next model immediately
+        } else if (isRateLimit && attempt < 2) {
+          console.log(`Rate limited on ${modelName}, waiting 10s...`);
+          await sleep(10000);
+        } else {
+          break; // Non-retryable error, try next model
+        }
       }
     }
   }
+
   throw lastError;
 }
 
@@ -222,20 +247,14 @@ function parseJsonResult(text: string, fallbackSources: string[]): EnrichmentRes
             linkedin_url: extractLinkedInUrl(raw.linkedin_url) || extractLinkedInUrl(text),
             confidence_score: Math.max(0, Math.min(100, parseInt(raw.confidence_score) || 0)),
             reasoning: raw.reasoning || '',
-            sources:
-              Array.isArray(raw.sources) && raw.sources.length > 0
-                ? raw.sources
-                : fallbackSources,
+            sources: Array.isArray(raw.sources) && raw.sources.length > 0 ? raw.sources : fallbackSources,
           };
         }
-      } catch {
-        continue;
-      }
+      } catch { continue; }
     }
   }
   return {
-    current_company: null,
-    current_title: null,
+    current_company: null, current_title: null,
     linkedin_url: extractLinkedInUrl(text),
     confidence_score: 0,
     reasoning: 'Could not parse a structured response from the search.',
