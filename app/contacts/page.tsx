@@ -121,40 +121,43 @@ export default function ContactsPage() {
     }
   };
 
+  const [enrichProgress, setEnrichProgress] = useState<{ current: number; total: number } | null>(null);
+
+  // Enriches contacts one-by-one from the frontend — works on Vercel serverless
+  const runEnrichmentQueue = async (ids: number[]) => {
+    setIsEnriching(true);
+    setEnrichProgress({ current: 0, total: ids.length });
+    for (let i = 0; i < ids.length; i++) {
+      setEnrichProgress({ current: i + 1, total: ids.length });
+      try {
+        await fetch(`/api/enrich/${ids[i]}`, { method: 'POST' });
+      } catch (e) {
+        console.error('Enrich failed for id', ids[i], e);
+      }
+      await fetchContacts();
+    }
+    setIsEnriching(false);
+    setEnrichProgress(null);
+    setSelectedIds([]);
+  };
+
   const handleEnrichSelected = async () => {
     if (selectedIds.length === 0) return;
-    setIsEnriching(true);
-    try {
-      const res = await fetch('/api/enrich', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: selectedIds }),
-      });
-      if (res.ok) {
-        setSelectedIds([]);
-        await fetchContacts();
-      }
-    } catch (error) {
-      console.error('Failed to start enrichment:', error);
-    } finally {
-      setIsEnriching(false);
-    }
+    await runEnrichmentQueue(selectedIds);
   };
 
   const handleEnrichAllPending = async () => {
     setIsEnriching(true);
     try {
-      const res = await fetch('/api/enrich', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: 'all' }),
-      });
-      if (res.ok) {
-        await fetchContacts();
-      }
+      // Get all pending contact IDs first
+      const res = await fetch('/api/contacts?status=pending&limit=5000');
+      if (!res.ok) return;
+      const result = await res.json();
+      const ids = result.contacts.map((c: Contact) => c.id);
+      if (ids.length === 0) { setIsEnriching(false); return; }
+      await runEnrichmentQueue(ids);
     } catch (error) {
-      console.error('Failed to start enrichment:', error);
-    } finally {
+      console.error('Failed enrichment:', error);
       setIsEnriching(false);
     }
   };
@@ -223,7 +226,11 @@ export default function ContactsPage() {
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
             </svg>
-            {isEnriching ? 'Starting...' : 'Enrich All Pending'}
+            {isEnriching
+              ? enrichProgress
+                ? `Enriching ${enrichProgress.current}/${enrichProgress.total}...`
+                : 'Starting...'
+              : 'Enrich All Pending'}
           </button>
           <Link href="/import" className="btn-secondary">
             Import CSV

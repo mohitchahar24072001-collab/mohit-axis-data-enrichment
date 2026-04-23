@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getContact } from '@/lib/db';
 import { enrichContact } from '@/lib/enrichment';
 
+export const maxDuration = 60; // Allow up to 60s on Vercel
+
 export async function POST(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -13,13 +15,13 @@ export async function POST(
       return NextResponse.json({ error: 'Invalid contact ID' }, { status: 400 });
     }
 
-    const contact = getContact(id);
+    const contact = await getContact(id);
     if (!contact) {
       return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
     }
 
     const result = await enrichContact(id);
-    const updated = getContact(id);
+    const updated = await getContact(id);
     return NextResponse.json({ success: true, contact: updated, enrichment: result });
   } catch (error) {
     console.error(`Enrich contact error:`, error);

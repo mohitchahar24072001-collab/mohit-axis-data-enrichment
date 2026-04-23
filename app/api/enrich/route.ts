@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getPendingContacts, getContactsByIds, updateContact, getContacts } from '@/lib/db';
 import { startEnrichmentQueue, stopEnrichmentQueue, getEnrichmentStatus, processOneContact } from '@/lib/enrichment';
 
+export const maxDuration = 60; // Allow up to 60s on Vercel
+
 // Reset contacts stuck in "enriching" (Vercel serverless killed mid-process)
 async function resetStuckContacts() {
   const result = await getContacts({ status: 'enriching', limit: 200 });
