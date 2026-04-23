@@ -235,24 +235,37 @@ Respond ONLY with this exact JSON (no markdown, no extra text):
 }
 
 function parseJsonResult(text: string, fallbackSources: string[]): EnrichmentResult {
-  const jsonMatch = text.match(/\{[\s\S]*?\}/g);
-  if (jsonMatch) {
-    for (let i = jsonMatch.length - 1; i >= 0; i--) {
-      try {
-        const raw = JSON.parse(jsonMatch[i]);
-        if ('confidence_score' in raw || 'current_company' in raw) {
-          return {
-            current_company: raw.current_company || null,
-            current_title: raw.current_title || null,
-            linkedin_url: extractLinkedInUrl(raw.linkedin_url) || extractLinkedInUrl(text),
-            confidence_score: Math.max(0, Math.min(100, parseInt(raw.confidence_score) || 0)),
-            reasoning: raw.reasoning || '',
-            sources: Array.isArray(raw.sources) && raw.sources.length > 0 ? raw.sources : fallbackSources,
-          };
-        }
-      } catch { continue; }
-    }
+  // Strip markdown code fences if present
+  const cleaned = text.replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
+
+  // Try multiple strategies to extract JSON
+  const strategies = [
+    // 1. Try the whole cleaned text
+    cleaned,
+    // 2. Greedy match — from first { to last }
+    (cleaned.match(/\{[\s\S]*\}/) || [])[0],
+    // 3. Original non-greedy approach — all matches, try from last to first
+    ...(cleaned.match(/\{[^{}]*\}/g) || []).reverse(),
+  ].filter(Boolean) as string[];
+
+  for (const candidate of strategies) {
+    try {
+      const raw = JSON.parse(candidate);
+      if ('confidence_score' in raw || 'current_company' in raw) {
+        return {
+          current_company: raw.current_company || null,
+          current_title: raw.current_title || null,
+          linkedin_url: extractLinkedInUrl(raw.linkedin_url) || extractLinkedInUrl(text),
+          confidence_score: Math.max(0, Math.min(100, parseInt(raw.confidence_score) || 0)),
+          reasoning: raw.reasoning || '',
+          sources: Array.isArray(raw.sources) && raw.sources.filter((s: string) => s.startsWith('http')).length > 0
+            ? raw.sources.filter((s: string) => s.startsWith('http'))
+            : fallbackSources,
+        };
+      }
+    } catch { continue; }
   }
+
   return {
     current_company: null, current_title: null,
     linkedin_url: extractLinkedInUrl(text),
