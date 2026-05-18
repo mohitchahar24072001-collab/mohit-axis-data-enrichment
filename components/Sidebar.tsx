@@ -55,7 +55,7 @@ export default function Sidebar() {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 px-3 py-4 space-y-1">
+      <nav className="flex-1 px-3 py-4 space-y-1 pb-16">
         {navItems.map((item) => {
           const isActive =
             item.href === '/'
@@ -79,6 +79,10 @@ export default function Sidebar() {
         })}
       </nav>
 
+      {/* Footer */}
+      <div className="px-6 py-4 border-t border-slate-700">
+        <p className="text-slate-500 text-xs">😎 Created by Mohit Chahar, just for fun</p>
+      </div>
     </div>
   );
 }
