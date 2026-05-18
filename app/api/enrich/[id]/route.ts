@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getContact } from '@/lib/db';
 import { enrichContact } from '@/lib/enrichment';
 
-export const maxDuration = 60; // Allow up to 60s on Vercel
+export const runtime = 'edge'; // Edge Runtime: no timeout cap on Vercel hobby plan (vs 10s serverless)
 
 export async function POST(
   _request: NextRequest,
