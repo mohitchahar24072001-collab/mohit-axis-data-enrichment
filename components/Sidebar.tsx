@@ -79,15 +79,6 @@ export default function Sidebar() {
         })}
       </nav>
 
-      {/* Footer */}
-      <div className="px-6 py-4 border-t border-slate-700">
-        <p className="text-slate-500 text-xs">
-          Powered by Claude AI
-        </p>
-        <p className="text-slate-600 text-xs mt-0.5">
-          v1.0.0
-        </p>
-      </div>
     </div>
   );
 }
